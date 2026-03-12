@@ -24,6 +24,7 @@ class JaxGymBridge(Node):
     def __init__(self):
         super().__init__('gym_bridge')
 
+        # 名前空間やトピックなどの既存パラメータ
         self.declare_parameter('ego_namespace', 'ego_racecar')
         self.declare_parameter('ego_odom_topic', 'odom')
         self.declare_parameter('ego_opp_odom_topic', 'opp_odom')
@@ -47,6 +48,10 @@ class JaxGymBridge(Node):
         self.declare_parameter('sy1', 1.0)
         self.declare_parameter('stheta1', 0.0)
         self.declare_parameter('kb_teleop', False)
+
+        self.declare_parameter('sim_rate', 100.0)
+        self.declare_parameter('scan_rate', 40.0)
+        self.declare_parameter('odom_rate', 100.0)
 
         num_agents = self.get_parameter('num_agent').value
         if num_agents < 1 or num_agents > 2:
@@ -102,8 +107,16 @@ class JaxGymBridge(Node):
             self.obs, _, self.done, _ = self.env.reset(np.array([[sx, sy, stheta]]))
             self.ego_scan = list(self.obs['scans'][0])
 
-        self.drive_timer = self.create_timer(0.01, self.drive_timer_callback)
-        self.timer = self.create_timer(0.004, self.timer_callback)
+        # Hzから周期(秒)への変換
+        sim_period = 1.0 / self.get_parameter('sim_rate').value
+        scan_period = 1.0 / self.get_parameter('scan_rate').value
+        odom_period = 1.0 / self.get_parameter('odom_rate').value
+
+        # 分割・独立させたタイマーの設定
+        self.drive_timer = self.create_timer(sim_period, self.drive_timer_callback)
+        self.scan_timer = self.create_timer(scan_period, self.scan_timer_callback)
+        self.odom_timer = self.create_timer(odom_period, self.odom_timer_callback)
+        
         self.br = TransformBroadcaster(self)
 
         self.ego_scan_pub = self.create_publisher(LaserScan, ego_scan_topic, 10)
@@ -173,24 +186,30 @@ class JaxGymBridge(Node):
                 self.obs, _, self.done, _ = self.env.reset(np.array([[sx, sy, stheta], [sx1, sy1, stheta1]]))
             else:
                 self.obs, _, self.done, _ = self.env.reset(np.array([[sx, sy, stheta]]))
-        self.ts = self.get_clock().now().to_msg()
+        
+        # 内部状態の更新のみを行い、タイムスタンプ取得は各配信用のタイマーに委ねる
         self._update_sim_state()
 
-    def timer_callback(self):
+    def scan_timer_callback(self):
+        ts = self.get_clock().now().to_msg()
         scan = LaserScan()
-        scan.header.stamp = self.ts; scan.header.frame_id = self.ego_namespace + '/laser'
+        scan.header.stamp = ts; scan.header.frame_id = self.ego_namespace + '/laser'
         scan.angle_min = self.angle_min; scan.angle_max = self.angle_max; scan.angle_increment = self.angle_inc
         scan.range_min = 0.; scan.range_max = 30.; scan.ranges = self.ego_scan
         self.ego_scan_pub.publish(scan)
+        
         if self.has_opp:
             opp_scan = LaserScan()
-            opp_scan.header.stamp = self.ts; opp_scan.header.frame_id = self.opp_namespace + '/laser'
+            opp_scan.header.stamp = ts; opp_scan.header.frame_id = self.opp_namespace + '/laser'
             opp_scan.angle_min = self.angle_min; opp_scan.angle_max = self.angle_max; opp_scan.angle_increment = self.angle_inc
             opp_scan.range_min = 0.; opp_scan.range_max = 30.; opp_scan.ranges = self.opp_scan
             self.opp_scan_pub.publish(opp_scan)
-        self._publish_odom(self.ts)
-        self._publish_transforms(self.ts)
-        self._publish_wheel_transforms(self.ts)
+
+    def odom_timer_callback(self):
+        ts = self.get_clock().now().to_msg()
+        self._publish_odom(ts)
+        self._publish_transforms(ts)
+        self._publish_wheel_transforms(ts)
 
     def _update_sim_state(self):
         self.ego_scan = list(self.obs['scans'][0])
