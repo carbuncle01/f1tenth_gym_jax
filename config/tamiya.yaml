@@ -22,11 +22,11 @@ sv_max: 3.2             # Maximum steering rate (rad/s)
 
 # Dynamics & Performance
 v_switch: 7.319         # Velocity threshold for dynamics mode switching (m/s)
-a_max: 15.0             # Maximum acceleration (higher than Traxxas due to light weight)
+a_max: 10.0             # Maximum acceleration (higher than Traxxas due to light weight)
 v_min: -5.0             # Minimum velocity (m/s, reverse)
 v_max: 20.0             # Maximum velocity (m/s, higher top speed ratio)
 
 # Vehicle Dimensions
-width: 0.082            # Vehicle width (scaled: ~82mm, smaller than Traxxas)
-length: 0.207           # Vehicle length (scaled: ~207mm, smaller than Traxxas)
+width: 0.18          # Vehicle width (scaled: ~180mm, smaller than Traxxas)
+length: 0.30           # Vehicle length (scaled: ~300mm, smaller than Traxxas)
 laser_distance: 0.23    # LiDAR mount distance from center (slightly closer due to smaller chassis)
