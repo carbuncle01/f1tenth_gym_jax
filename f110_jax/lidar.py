@@ -219,3 +219,40 @@ def ray_cast_agents(scan, pose, scan_angles, opp_vertices_list):
                 )
     
     return new_scan
+
+@jax.jit
+def ray_cast_single_agent(scan, ego_pose, scan_angles, opp_vertices):
+    min_ind, max_ind = get_blocked_view_indices(ego_pose, opp_vertices, scan_angles)
+    beam_indices = jnp.arange(scan.shape[0])
+    
+    # 動的ループを排除し、影の範囲内のビームだけを対象とする「マスク」を作成
+    valid_mask = (beam_indices >= min_ind) & (beam_indices <= max_ind)
+    
+    beam_thetas = ego_pose[2] + scan_angles
+    v0, v1, v2, v3 = opp_vertices[0], opp_vertices[1], opp_vertices[2], opp_vertices[3]
+    
+    # 4つのエッジすべてに対する交差判定
+    def check_all_edges(beam_theta):
+        d1 = get_range(ego_pose, beam_theta, v0, v1)
+        d2 = get_range(ego_pose, beam_theta, v1, v2)
+        d3 = get_range(ego_pose, beam_theta, v2, v3)
+        d4 = get_range(ego_pose, beam_theta, v3, v0)
+        return jnp.min(jnp.array([d1, d2, d3, d4]))
+    
+    # 全ビームに対して一括計算
+    opp_ranges = jax.vmap(check_all_edges)(beam_thetas)
+    
+    # マスクの範囲内だけ更新し、範囲外は元のscanをそのまま返す
+    return jnp.where(valid_mask, jnp.minimum(scan, opp_ranges), scan)
+
+@jax.jit
+def ray_cast_agents(scan, ego_pose, scan_angles, all_vertices, ego_idx):
+    num_agents = all_vertices.shape[0]
+    
+    def body_fn(i, current_scan):
+        is_ego = (i == ego_idx)
+        new_scan = ray_cast_single_agent(current_scan, ego_pose, scan_angles, all_vertices[i])
+        # 自分が対象の場合は更新せず、他車両の場合のみスキャンを上書き
+        return jnp.where(is_ego, current_scan, new_scan)
+    
+    return jax.lax.fori_loop(0, num_agents, body_fn, scan)
