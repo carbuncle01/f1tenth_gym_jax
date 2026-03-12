@@ -8,6 +8,30 @@ from f110_jax.dynamics import vehicle_dynamics_st, pid
 from f110_jax.lidar import get_scan, ray_cast_agents
 from f110_jax.collision import collision_multiple, get_vertices
 
+@jax.jit
+def update_steer_buffer(buffers, new_steers):
+    """固定長JAX配列を使ったステアリング遅延バッファの更新"""
+    # 1列分左にシフトし、一番右に最新のsteerを入れる
+    shifted = buffers.at[:, :-1].set(buffers[:, 1:])
+    new_buffers = shifted.at[:, -1].set(new_steers)
+    # 遅延されたステアリング値（一番古い値）は列0
+    delayed_steers = new_buffers[:, 0]
+    return new_buffers, delayed_steers
+
+@jax.jit
+def check_ttc_jax(scan, vel, cosines, side_distances, ttc_thresh):
+    proj_vel = vel * cosines
+    # ゼロ除算回避のため、proj_velが0以下の場合は安全な値(1.0)に置き換え
+    valid_mask = proj_vel > 0.0
+    safe_proj_vel = jnp.where(valid_mask, proj_vel, 1.0)
+    
+    ttc = (scan - side_distances) / safe_proj_vel
+    
+    # 衝突条件: ttcが閾値未満 かつ ttcが0以上 かつ proj_velが正
+    is_collision = valid_mask & (ttc < ttc_thresh) & (ttc >= 0.0)
+    
+    # いずれかのビームで衝突していればTrue
+    return jnp.any(is_collision)
 
 class Integrator(Enum):
     RK4 = 1
@@ -121,7 +145,7 @@ class F110JaxSimulator:
         self.steer_buffer_size = 2
         # Each agent has its own buffer: [num_agents, steer_buffer_size]
         # Initialized empty (will be filled during step)
-        self.steer_buffers = [np.empty((0,)) for _ in range(num_agents)]
+        self.steer_buffers_jax = jnp.zeros((self.num_agents, self.steer_buffer_size))
         
         # Precompute iTTC side distances and cosines for each beam
         self._precompute_ttc_tables()
@@ -150,8 +174,8 @@ class F110JaxSimulator:
         # Load map info
         self._load_map(map_path, map_ext)
         
-        # Scan noise RNG (matching original)
-        self.scan_rng = np.random.default_rng(seed=self.seed)
+        # Scan noise RNG
+        self.rng_key = jax.random.PRNGKey(self.seed)
         
         # JIT-compile the batched step logic using vmap
         self._batched_dynamics = jax.jit(jax.vmap(
@@ -164,6 +188,21 @@ class F110JaxSimulator:
             get_scan,
             in_axes=(0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None)
         ), static_argnums=(3, 15))
+
+        self._batched_get_vertices = jax.jit(jax.vmap(
+            get_vertices, 
+            in_axes=(0, None, None)
+        ))
+
+        self._batched_pid = jax.jit(jax.vmap(
+            pid,
+            in_axes=(0, 0, 0, 0, None, None, None, None)
+        ))
+
+        self._batched_check_ttc = jax.jit(jax.vmap(
+            check_ttc_jax, 
+            in_axes=(0, 0, None, None, None)
+        ))
 
     def _get_lidar_poses(self):
         """
@@ -253,33 +292,6 @@ class F110JaxSimulator:
         self.start_thetas = np.zeros(self.num_agents)
         self.start_rot = np.eye(2)
 
-    def _apply_steering_delay(self, raw_steers):
-        """
-        Apply steering delay buffer for each agent.
-        Matches original base_classes.py RaceCar.update_pose logic:
-        - buffer_size = 2
-        - if buffer not full, steer = 0, prepend raw_steer to buffer
-        - if buffer full, steer = last element of buffer, remove last, prepend raw_steer
-        
-        Args:
-            raw_steers: [num_agents] array of raw steering angles
-        Returns:
-            delayed_steers: [num_agents] array of delayed steering angles
-        """
-        delayed_steers = np.zeros(self.num_agents)
-        
-        for i in range(self.num_agents):
-            raw_steer = float(raw_steers[i])
-            if self.steer_buffers[i].shape[0] < self.steer_buffer_size:
-                delayed_steers[i] = 0.0
-                self.steer_buffers[i] = np.append(raw_steer, self.steer_buffers[i])
-            else:
-                delayed_steers[i] = self.steer_buffers[i][-1]
-                self.steer_buffers[i] = self.steer_buffers[i][:-1]
-                self.steer_buffers[i] = np.append(raw_steer, self.steer_buffers[i])
-        
-        return delayed_steers
-
     def reset(self, poses):
         """
         Reset the simulator to specific poses.
@@ -304,8 +316,8 @@ class F110JaxSimulator:
         self.collision_idx = -1 * np.ones((self.num_agents,))
         
         # Reset steering delay buffers
-        self.steer_buffers = [np.empty((0,)) for _ in range(self.num_agents)]
-        
+        self.steer_buffers_jax = jnp.zeros((self.num_agents, self.steer_buffer_size))
+
         # Reset lap counters
         self.current_time = 0.0
         self.lap_times = np.zeros(self.num_agents)
@@ -328,7 +340,7 @@ class F110JaxSimulator:
         ])
         
         # Reset scan RNG
-        self.scan_rng = np.random.default_rng(seed=self.seed)
+        self.rng_key = jax.random.PRNGKey(self.seed)
         
         # Get initial observation with zero input (matching original)
         action = np.zeros((self.num_agents, 2))
@@ -350,7 +362,11 @@ class F110JaxSimulator:
             f"Invalid controls shape: expected ({self.num_agents}, 2), got {controls.shape}"
         
         # Apply steering delay (matching original)
-        delayed_steers = self._apply_steering_delay(controls[:, 0])
+        new_steers_jax = jnp.array(controls[:, 0])
+        self.steer_buffers_jax, delayed_steers_jax = update_steer_buffer(
+            self.steer_buffers_jax, new_steers_jax
+        )
+        delayed_steers = np.array(delayed_steers_jax)
         desired_speeds = controls[:, 1]
         
         # For each agent, compute PID (steer, speed -> sv, accl)
@@ -358,27 +374,24 @@ class F110JaxSimulator:
         current_steers = np.array(self.state[:, 2])
         current_speeds = np.array(self.state[:, 3])
         
-        svs = np.zeros(self.num_agents)
-        accls = np.zeros(self.num_agents)
+        accls_jax, svs_jax = self._batched_pid(
+            jnp.array(desired_speeds),
+            delayed_steers_jax,
+            jnp.array(current_speeds),
+            jnp.array(current_steers),
+            jnp.float32(self.sv_max),
+            jnp.float32(self.a_max),
+            jnp.float32(self.v_max),
+            jnp.float32(self.v_min)
+        )
         
-        for i in range(self.num_agents):
-            if self.collisions[i] == 0.:
-                # PID computation (use plain numpy for non-colliding agents)
-                accl_val, sv_val = pid(
-                    jnp.float32(desired_speeds[i]),
-                    jnp.float32(delayed_steers[i]),
-                    jnp.float32(current_speeds[i]),
-                    jnp.float32(current_steers[i]),
-                    jnp.float32(self.sv_max),
-                    jnp.float32(self.a_max),
-                    jnp.float32(self.v_max),
-                    jnp.float32(self.v_min)
-                )
-                accls[i] = float(accl_val)
-                svs[i] = float(sv_val)
+        # 衝突していない(collisions == 0.0)エージェントのみ制御入力を有効にする
+        active_mask = (jnp.array(self.collisions) == 0.0)
+        accls_jax = jnp.where(active_mask, accls_jax, 0.0)
+        svs_jax = jnp.where(active_mask, svs_jax, 0.0)
         
         # Stack into dynamics-compatible input [sv, accl]
-        u_jax = jnp.array(np.stack([svs, accls], axis=1))
+        u_jax = jnp.stack([svs_jax, accls_jax], axis=1)
         
         # Physics integration (only for non-colliding agents, matching original)
         params = (self.mu, self.C_Sf, self.C_Sr, self.lf, self.lr,
@@ -425,25 +438,18 @@ class F110JaxSimulator:
         )
         
         # Convert scans to numpy for per-agent processing
-        scans_np = np.array(scans_jax)
-        
-        # Add scan noise (matching original: std_dev=0.01)
-        for i in range(self.num_agents):
-            noise = self.scan_rng.normal(0., 0.01, size=self.num_beams)
-            scans_np[i] += noise
-        
+        self.rng_key, subkey = jax.random.split(self.rng_key)
+        noise = jax.random.normal(subkey, shape=(self.num_agents, self.num_beams)) * 0.01
+        scans_jax = scans_jax + noise
+        scans_np = np.array(scans_jax) # 後続のNumPy処理用
+                
         # Check car-to-car collisions (GJK)
-        all_vertices = np.empty((self.num_agents, 4, 2))
-        for i in range(self.num_agents):
-            all_vertices[i, :, :] = np.array(
-                get_vertices(
-                    jnp.array(agent_poses[i]),
-                    self.car_length,
-                    self.car_width
-                )
-            )
+        agent_poses_jax = jnp.array(agent_poses)
+        all_vertices_jax = self._batched_get_vertices(agent_poses_jax, self.car_length, self.car_width)
+        all_vertices = np.array(all_vertices_jax) # 後続のNumPy処理(ray_cast_agents等)用
         
-        car_collisions, car_collision_idx = collision_multiple(jnp.array(all_vertices))
+        car_collisions, car_collision_idx = collision_multiple(all_vertices_jax)
+
         self.collisions = np.array(car_collisions)
         self.collision_idx = np.array(car_collision_idx)
         
@@ -469,16 +475,24 @@ class F110JaxSimulator:
                 )
         
         # Check iTTC wall collisions for each agent
-        for i in range(self.num_agents):
-            vel = float(self.state[i, 3])
-            if vel != 0.0:
-                in_collision = self._check_ttc(scans_np[i], vel)
-                if in_collision:
-                    # Stop the vehicle (matching original)
-                    self.state = self.state.at[i, 3].set(0.0)  # vel = 0
-                    self.state = self.state.at[i, 5].set(0.0)  # yaw_rate = 0
-                    self.state = self.state.at[i, 6].set(0.0)  # slip_angle = 0
-                    self.collisions[i] = 1.0
+        vels_jax = self.state[:, 3]
+        # 全エージェントのiTTC壁衝突判定を一括計算
+        ttc_collisions = self._batched_check_ttc(
+            scans_jax, vels_jax, self.cosines_jax, self.side_distances_jax, self.ttc_thresh
+        )
+        
+        # 衝突したエージェントは速度(3), ヨーレート(5), スリップ角(6)を0にリセット
+        # 状態更新用マスク: 形を (num_agents, 1) に拡張
+        stop_mask = ttc_collisions[:, None] 
+        self.state = jnp.where(
+            stop_mask, 
+            self.state.at[:, 3].set(0.0).at[:, 5].set(0.0).at[:, 6].set(0.0), 
+            self.state
+        )
+        
+        # self.collisions (NumPy配列)の更新
+        ttc_collisions_np = np.array(ttc_collisions)
+        self.collisions = np.where(ttc_collisions_np, 1.0, self.collisions)
         
         # Update time
         self.current_time += self.time_step
@@ -499,28 +513,6 @@ class F110JaxSimulator:
         info = {'checkpoint_done': self.toggle_list >= 4}
         
         return obs, reward, done, info
-
-    def _check_ttc(self, scan, vel):
-        """
-        Check iTTC (inverse Time To Collision) for wall collision.
-        Matches original laser_models.check_ttc_jit exactly.
-        
-        Args:
-            scan: [num_beams] scan array
-            vel: current velocity
-        Returns:
-            in_collision: bool
-        """
-        cosines = np.array(self.cosines_jax)
-        side_distances = np.array(self.side_distances_jax)
-        
-        for i in range(self.num_beams):
-            proj_vel = vel * cosines[i]
-            if proj_vel != 0.0:
-                ttc = (scan[i] - side_distances[i]) / proj_vel
-                if ttc < self.ttc_thresh and ttc >= 0.0:
-                    return True
-        return False
 
     def _check_done(self):
         """
