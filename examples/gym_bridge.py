@@ -1,13 +1,3 @@
-"""
-ROS 2 GymBridge — JAX GPU Simulator版
-
-オリジナルの f1tenth_gym_ros の gym_bridge.py と互換性あり。
-F110JaxSimulator を使用してシミュレーションを実行し、
-ROS 2 トピック経由で scan/odom/tf を配信する。
-
-Usage (ROS 2):
-    ros2 run f1tenth_gym_jax gym_bridge
-"""
 import rclpy
 from rclpy.node import Node
 import os

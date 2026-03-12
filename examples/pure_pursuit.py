@@ -1,15 +1,3 @@
-"""
-Pure Pursuit走行テスト
-
-f1tenth_gym のexample_mapとwaypointsを使って、
-JAXシミュレータでcenter line追従走行し、結果を動画で出力する。
-
-Usage:
-    python examples/pure_pursuit.py
-
-マップファイルのデフォルトパスは兄弟ディレクトリの f1tenth_gym を参照。
-環境変数 F1TENTH_MAP_DIR で任意のマップディレクトリを指定可能。
-"""
 import sys
 import os
 import time
@@ -19,11 +7,10 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from argparse import Namespace
 from PIL import Image
+import jax
 
-# パッケージがインストールされていない場合のフォールバック
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from f110_jax.simulator import F110JaxSimulator, Integrator
-
 
 # ==============================================================================
 # Pure Pursuit Planner (from original f1tenth_gym waypoint_follow.py)
@@ -135,7 +122,6 @@ class PurePursuitPlanner:
         speed = vgain * speed
         return speed, steering_angle
 
-
 # ==============================================================================
 # Main
 # ==============================================================================
@@ -143,7 +129,7 @@ def main():
     # マップディレクトリの解決
     gym_examples_dir = os.environ.get(
         'F1TENTH_MAP_DIR',
-        os.path.abspath(os.path.join(os.path.dirname(__file__), '../../f1tenth_gym/examples'))
+        os.path.abspath(os.path.join(os.path.dirname(__file__), '../examples'))
     )
     config_path = os.path.join(gym_examples_dir, 'config_example_map.yaml')
     
@@ -167,7 +153,7 @@ def main():
     
     print("Loading JAX Simulator...")
     yaml_path = conf.map_path + '.yaml'
-    sim = F110JaxSimulator(yaml_path, conf.map_ext, num_agents=1)
+    sim = F110JaxSimulator(yaml_path, conf.map_ext, num_agents=1, integrator=Integrator.RK4)
     
     # Start on the nearest waypoint
     wpt_data = planner.waypoints
@@ -184,70 +170,139 @@ def main():
     print(f"Start pose: x={poses[0,0]:.3f}, y={poses[0,1]:.3f}, theta={np.degrees(start_theta):.1f}deg")
     obs, _, done, _ = sim.reset(poses)
     
-    traj_x, traj_y = [], []
+    # ---- 1. ウォームアップ (JAXのコンパイルを計測に含めない) ----
+    print("JAX Warming up...")
+    dummy_action = np.array([[0.0, 0.0]])
+    sim.step(dummy_action)
+    jax.block_until_ready(sim.state) # コンパイル完了を待機
+    
+    # ---- 2. 本番シミュレーション ----
+    # 軌跡に加えて、向き(theta)とLiDARスキャンデータも保存するリストを追加
+    traj_x, traj_y = [obs['poses_x'][0]], [obs['poses_y'][0]]
+    traj_theta = [obs['poses_theta'][0]]
+    traj_scans = [obs['scans'][0]]
+    
     laptime = 0.0
-    start = time.time()
     steps = 0
     max_steps = 3000
     
     print("Simulating...")
+    start = time.time()
+    
     while not done and steps < max_steps:
+        # Plannerの計算はNumPy (CPU)
         speed, steer = planner.plan(
             obs['poses_x'][0], obs['poses_y'][0], obs['poses_theta'][0],
             work['tlad'], work['vgain']
         )
+        
+        # JAX Simulatorのステップ実行
         obs, step_reward, done, info = sim.step(np.array([[steer, speed]]))
+        
         traj_x.append(obs['poses_x'][0])
         traj_y.append(obs['poses_y'][0])
-        laptime += 0.01
+        traj_theta.append(obs['poses_theta'][0]) # 向きを保存
+        traj_scans.append(obs['scans'][0])       # LiDARスキャンを保存
+        
+        laptime += sim.time_step
         steps += 1
-    
+        
+    jax.block_until_ready(sim.state) # 全ての非同期計算の完了を待機
     elapsed = time.time() - start
+    
     print(f"Done: {steps} steps, {laptime:.1f}s sim, {elapsed:.1f}s real, {steps/elapsed:.0f} FPS")
     print(f"Collisions: {obs['collisions']}, Laps: {obs['lap_counts']}")
     
-    # ---- Render video ----
-    print("Rendering video...")
+    # ---- 3. レンダリング (動画保存) ----
+    print("Rendering video with LiDAR...")
     with open(yaml_path, 'r') as f:
         map_meta = yaml.safe_load(f)
     origin = map_meta['origin']
     resolution = map_meta['resolution']
-    img = Image.open(conf.map_path + conf.map_ext)
+    
+    img = Image.open(conf.map_path + conf.map_ext).transpose(Image.FLIP_TOP_BOTTOM)
+    img_array = np.array(img)
+    height, width = img_array.shape
+    
+    extent = [
+        origin[0], origin[0] + width * resolution,
+        origin[1], origin[1] + height * resolution
+    ]
     
     fig, ax = plt.subplots(figsize=(10, 10))
-    ax.imshow(img, cmap='gray', origin='lower', extent=[
-        origin[0], origin[0] + img.size[0] * resolution,
-        origin[1], origin[1] + img.size[1] * resolution
-    ])
+    # マップの描画を少し暗くしてLiDARを目立たせる (vmaxを調整)
+    ax.imshow(img_array, cmap='gray', origin='lower', extent=extent, vmax=255, vmin=-50)
+    
     wpt_x = wpt_data[:, conf.wpt_xind]
     wpt_y = wpt_data[:, conf.wpt_yind]
-    ax.plot(wpt_x, wpt_y, 'g--', linewidth=1, label='Centerline')
-    car_line, = ax.plot([], [], 'r-', linewidth=2, label='Trajectory')
-    car_pos, = ax.plot([], [], 'bo', markersize=6, label='Car')
-    ax.legend()
-    ax.set_title('JAX Pure Pursuit Tracking')
+    ax.plot(wpt_x, wpt_y, 'g--', linewidth=1.5, alpha=0.7, label='Centerline')
     
-    frame_skip = max(1, steps // 500)
+    # 車両の軌跡と現在位置
+    car_line, = ax.plot([], [], 'b-', linewidth=2.5, alpha=0.8, label='Trajectory')
+    car_pos, = ax.plot([], [], 'ro', markersize=8, zorder=5, label='Car')
+    
+    # LiDARのヒットポイントを描画する散布図オブジェクトを作成 (オレンジ色の小さな点)
+    lidar_pts = ax.scatter([], [], s=2, c='orange', alpha=0.6, zorder=4, label='LiDAR Hits')
+    
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_aspect('equal')
+    ax.legend(loc='upper right')
+    ax.set_title('JAX Pure Pursuit + LiDAR 2D Scan')
+    
+    frame_skip = 3 
     frames = steps // frame_skip
+    
+    # 事前にJAXで計算したレーザーの角度配列(1080本)を取得 (NumPy化しておく)
+    scan_angles = np.array(sim.scan_angles)
     
     def init():
         car_line.set_data([], [])
         car_pos.set_data([], [])
-        return car_line, car_pos
+        lidar_pts.set_offsets(np.empty((0, 2)))
+        return car_line, car_pos, lidar_pts
     
     def animate(i):
-        idx = i * frame_skip
-        car_line.set_data(traj_x[:idx], traj_y[:idx])
+        idx = min(i * frame_skip, len(traj_x) - 1)
+        
+        # 軌跡と車体の更新
+        car_line.set_data(traj_x[:idx+1], traj_y[:idx+1])
         car_pos.set_data([traj_x[idx]], [traj_y[idx]])
-        return car_line, car_pos
+        
+        # --- LiDARポイントの計算と更新 ---
+        current_x = traj_x[idx]
+        current_y = traj_y[idx]
+        current_theta = traj_theta[idx]
+        current_scan = traj_scans[idx]
+        
+        # 車の向き(theta) ＋ 各ビームの角度(scan_angles) ＝ グローバルなレーザーの角度
+        global_angles = current_theta + scan_angles
+        
+        # 極座標(距離と角度)から直交座標(X, Y)へ変換
+        pts_x = current_x + current_scan * np.cos(global_angles)
+        pts_y = current_y + current_scan * np.sin(global_angles)
+        
+        # 散布図の座標データを一括更新
+        lidar_pts.set_offsets(np.c_[pts_x, pts_y])
+        
+        return car_line, car_pos, lidar_pts
     
     ani = animation.FuncAnimation(fig, animate, init_func=init, frames=frames, interval=33, blit=True)
+    
     out_dir = os.path.join(os.path.dirname(__file__), '..', 'output')
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, 'pure_pursuit.mp4')
-    ani.save(out_path, writer=animation.FFMpegWriter(fps=30))
-    print(f"Saved: {out_path}")
+    out_path = os.path.join(out_dir, 'pure_pursuit_lidar.mp4')
+    
+    try:
+        writer = animation.FFMpegWriter(fps=30, bitrate=2000)
+        ani.save(out_path, writer=writer)
+        print(f"Saved: {out_path}")
+    except Exception as e:
+        print(f"MP4の保存に失敗しました: {e}")
+        alt_path = out_path.replace('.mp4', '.gif')
+        ani.save(alt_path, writer='pillow', fps=30)
 
+    plt.close()
 
 if __name__ == '__main__':
     main()
