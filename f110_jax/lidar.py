@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+from functools import partial  
 
 @jax.jit
 def get_dt(bitmap, resolution):
@@ -10,7 +11,7 @@ def get_dt(bitmap, resolution):
     """
     pass
 
-@jax.jit(static_argnums=(3, 15))
+@partial(jax.jit, static_argnums=(3, 15))
 def get_scan(pose, theta_dis, fov, num_beams, sines, cosines, eps, orig_x, orig_y, orig_c, orig_s, height, width, resolution, dt, max_range):
     """
     Perform 2D LiDAR ray casting in parallel using JAX vmap.
