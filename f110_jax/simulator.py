@@ -345,86 +345,55 @@ class F110JaxSimulator:
         self._compiled_step = step_kernel
 
     def reset(self, poses):
-        assert poses.shape == (self.num_agents, 3), f"Invalid poses shape: expected ({self.num_agents}, 3), got {poses.shape}"
+        # 1. 入力を即座に JAX 配列 (GPUメモリ) に転送
+        poses_jax = jnp.array(poses, dtype=jnp.float32)
+        assert poses_jax.shape == (self.num_agents, 3), f"Invalid poses shape: expected ({self.num_agents}, 3), got {poses_jax.shape}"
         
-        new_state = jnp.zeros((self.num_agents, 7))
-        new_state = new_state.at[:, 0:2].set(poses[:, 0:2])
-        new_state = new_state.at[:, 4].set(poses[:, 2])
-        self.state = new_state
+        # 2. 初期状態をすべて JAX 配列として生成
+        new_state = jnp.zeros((self.num_agents, 7), dtype=jnp.float32)
+        new_state = new_state.at[:, 0:2].set(poses_jax[:, 0:2])
+        new_state = new_state.at[:, 4].set(poses_jax[:, 2])
         
-        self.collisions = np.zeros((self.num_agents,))
-        self.collision_idx = -1 * np.ones((self.num_agents,))
-        self.steer_buffers_jax = jnp.zeros((self.num_agents, self.steer_buffer_size))
+        start_xs = poses_jax[:, 0]
+        start_ys = poses_jax[:, 1]
+        start_thetas = poses_jax[:, 2]
+        
+        cos_th = jnp.cos(-start_thetas[self.ego_idx])
+        sin_th = jnp.sin(-start_thetas[self.ego_idx])
+        start_rot = jnp.array([[cos_th, -sin_th], [sin_th, cos_th]], dtype=jnp.float32)
 
-        self.current_time = 0.0
-        self.lap_times = np.zeros(self.num_agents)
-        self.lap_counts = np.zeros(self.num_agents)
-        self.near_starts = np.array([True] * self.num_agents)
-        self.toggle_list = np.zeros(self.num_agents)
+        # 3. クラスのプロパティではなく、1つの「シミュレーション状態辞書」として保持
+        self.sim_state = {
+            'state': new_state,
+            'collisions': jnp.zeros((self.num_agents,), dtype=jnp.float32),
+            'collision_idx': -1 * jnp.ones((self.num_agents,), dtype=jnp.float32),
+            'steer_buffers': jnp.zeros((self.num_agents, self.steer_buffer_size), dtype=jnp.float32),
+            'rng_key': jax.random.PRNGKey(self.seed),
+            'current_time': jnp.float32(0.0),
+            'lap_times': jnp.zeros((self.num_agents,), dtype=jnp.float32),
+            'lap_counts': jnp.zeros((self.num_agents,), dtype=jnp.float32),
+            'near_starts': jnp.ones((self.num_agents,), dtype=jnp.bool_),
+            'toggle_list': jnp.zeros((self.num_agents,), dtype=jnp.float32),
+            'start_xs': start_xs,
+            'start_ys': start_ys,
+            'start_rot': start_rot
+        }
         
-        self.start_xs = poses[:, 0].copy()
-        self.start_ys = poses[:, 1].copy()
-        self.start_thetas = poses[:, 2].copy()
-        
-        cos_th = np.cos(-self.start_thetas[self.ego_idx])
-        sin_th = np.sin(-self.start_thetas[self.ego_idx])
-        self.start_rot = np.array([[cos_th, -sin_th], [sin_th, cos_th]])
-        
-        self.rng_key = jax.random.PRNGKey(self.seed)
-        
-        action = np.zeros((self.num_agents, 2))
+        # ダミーステップを実行して初期観測を取得
+        action = jnp.zeros((self.num_agents, 2), dtype=jnp.float32)
         obs, reward, done, info = self.step(action)
         return obs, reward, done, info
 
     def step(self, controls):
-        # 状態をディクショナリにパッキングしてJAX関数に渡す
-        sim_state = {
-            'state': self.state,
-            'collisions': jnp.array(self.collisions),
-            'collision_idx': jnp.array(self.collision_idx),
-            'steer_buffers': self.steer_buffers_jax,
-            'rng_key': self.rng_key,
-            'current_time': jnp.float32(self.current_time),
-            'lap_times': jnp.array(self.lap_times),
-            'lap_counts': jnp.array(self.lap_counts),
-            'near_starts': jnp.array(self.near_starts),
-            'toggle_list': jnp.array(self.toggle_list),
-            'start_xs': jnp.array(self.start_xs),
-            'start_ys': jnp.array(self.start_ys),
-            'start_rot': jnp.array(self.start_rot)
-        }
+        # コントロール入力が NumPy配列などの場合、JAX配列にキャスト (低コスト)
+        controls_jax = jnp.asarray(controls, dtype=jnp.float32)
         
-        # End-to-End JIT実行（ここで1ステップの全計算が完了します）
-        new_sim_state, obs_jax, reward, done, info = self._compiled_step(sim_state, jnp.array(controls))
+        new_sim_state, obs_jax, reward, done, info = self._compiled_step(self.sim_state, controls_jax)
         
-        # 新しい状態をクラスの変数にアンパッキング
-        self.state = new_sim_state['state']
-        self.collisions = np.array(new_sim_state['collisions'])
-        self.collision_idx = np.array(new_sim_state['collision_idx'])
-        self.steer_buffers_jax = new_sim_state['steer_buffers']
-        self.rng_key = new_sim_state['rng_key']
-        self.current_time = float(new_sim_state['current_time'])
-        self.lap_times = np.array(new_sim_state['lap_times'])
-        self.lap_counts = np.array(new_sim_state['lap_counts'])
-        self.near_starts = np.array(new_sim_state['near_starts'])
-        self.toggle_list = np.array(new_sim_state['toggle_list'])
+        # 状態を JAX 配列のまま更新
+        self.sim_state = new_sim_state
         
-        # オリジナルのf110_gymと互換性を持たせるため、出力をPythonのlist/floatに変換
-        obs = {
-            'ego_idx': int(obs_jax['ego_idx']),
-            'scans': [np.array(s) for s in obs_jax['scans']],
-            'poses_x': [float(x) for x in obs_jax['poses_x']],
-            'poses_y': [float(y) for y in obs_jax['poses_y']],
-            'poses_theta': [float(t) for t in obs_jax['poses_theta']],
-            'linear_vels_x': [float(v) for v in obs_jax['linear_vels_x']],
-            'linear_vels_y': [float(v) for v in obs_jax['linear_vels_y']],
-            'ang_vels_z': [float(w) for w in obs_jax['ang_vels_z']],
-            'collisions': self.collisions.copy(),
-            'lap_times': self.lap_times.copy(),
-            'lap_counts': self.lap_counts.copy()
-        }
-        
-        return obs, float(reward), bool(done), info
+        return obs_jax, reward, done, info
 
     def update_params(self, params, agent_idx=-1):
         self.params.update(params)
