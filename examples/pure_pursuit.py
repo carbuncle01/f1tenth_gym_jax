@@ -1,16 +1,15 @@
 import sys
 import os
 import time
+import argparse
 import numpy as np
 import yaml
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from argparse import Namespace
 from PIL import Image
-import jax
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from f110_jax.simulator import F110JaxSimulator, Integrator
 
 # ==============================================================================
 # Pure Pursuit Planner (from original f1tenth_gym waypoint_follow.py)
@@ -126,6 +125,24 @@ class PurePursuitPlanner:
 # Main
 # ==============================================================================
 def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        '--device',
+        type=str,
+        choices=['auto', 'cpu', 'gpu'],
+        default='auto',
+        help='JAX backend device. Choose from auto, cpu, gpu.'
+    )
+    args, _ = parser.parse_known_args()
+
+    if args.device != 'auto':
+        os.environ['JAX_PLATFORM_NAME'] = args.device
+
+    import jax
+    from f110_jax.simulator import F110JaxSimulator, Integrator
+
+    print(f"Using device setting: {args.device} (backend: {jax.default_backend()})")
+
     # マップディレクトリの解決
     gym_examples_dir = os.environ.get(
         'F1TENTH_MAP_DIR',

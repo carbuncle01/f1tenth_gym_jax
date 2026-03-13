@@ -1,23 +1,22 @@
 import os
 import sys
 import time
+import argparse
 import numpy as np
 import yaml
 from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-import jax
-import jax.numpy as jnp
-from jax import tree_util
 from argparse import Namespace
 
-from f110_jax.simulator import F110JaxSimulator, Integrator
 from pure_pursuit import PurePursuitPlanner
 
 def pack_sim_state(sim):
     """
     SimulatorインスタンスからJAX関数に渡すための状態辞書を抽出するヘルパー関数
     """
+    import jax.numpy as jnp
+
     return {
         'state': sim.state,
         'collisions': jnp.array(sim.collisions),
@@ -35,6 +34,26 @@ def pack_sim_state(sim):
     }
 
 def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        '--device',
+        type=str,
+        choices=['auto', 'cpu', 'gpu'],
+        default='auto',
+        help='JAX backend device. Choose from auto, cpu, gpu.'
+    )
+    args, _ = parser.parse_known_args()
+
+    if args.device != 'auto':
+        os.environ['JAX_PLATFORM_NAME'] = args.device
+
+    import jax
+    import jax.numpy as jnp
+    from jax import tree_util
+    from f110_jax.simulator import F110JaxSimulator, Integrator
+
+    print(f"Using device setting: {args.device} (backend: {jax.default_backend()})")
+
     num_envs = 10  # テストする環境の数
     max_steps = 300
 

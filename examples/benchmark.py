@@ -2,10 +2,7 @@ import time
 import os
 import argparse
 import numpy as np
-import jax
 import matplotlib.pyplot as plt
-
-from f110_jax.simulator import F110JaxSimulator, Integrator
 
 def generate_initial_poses(num_agents):
     """初期姿勢を生成する。車両同士の重なりを避けるために y 方向へ等間隔で配置する。"""
@@ -17,6 +14,8 @@ def generate_initial_poses(num_agents):
 
 
 def run_benchmark(sim, num_agents, num_steps=1000, speed=5.0):
+    import jax
+
     # テスト用のダミー入力 (直進): [steer, speed]
     actions = np.zeros((num_agents, 2), dtype=np.float32)
     actions[:, 1] = speed
@@ -101,7 +100,31 @@ def parse_env_counts(env_counts_str):
     return [int(x.strip()) for x in env_counts_str.split(',') if x.strip()]
 
 if __name__ == '__main__':
+    # Parse device first so we can decide backend before importing jax/f110_jax.
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        '--device',
+        type=str,
+        choices=['auto', 'cpu', 'gpu'],
+        default='auto',
+        help='JAX backend device. Choose from auto, cpu, gpu.'
+    )
+    pre_args, remaining_argv = pre_parser.parse_known_args()
+
+    if pre_args.device != 'auto':
+        os.environ['JAX_PLATFORM_NAME'] = pre_args.device
+
+    from f110_jax.simulator import F110JaxSimulator, Integrator
+    import jax
+
     parser = argparse.ArgumentParser(description='Benchmark FPS vs number of environments.')
+    parser.add_argument(
+        '--device',
+        type=str,
+        choices=['auto', 'cpu', 'gpu'],
+        default=pre_args.device,
+        help='JAX backend device. Choose from auto, cpu, gpu.'
+    )
     parser.add_argument('--num-steps', type=int, default=1000, help='Number of benchmark steps per env count.')
     parser.add_argument('--speed', type=float, default=5.0, help='Constant speed used for dummy action.')
     parser.add_argument(
@@ -110,7 +133,7 @@ if __name__ == '__main__':
         default='1,2,4,8,16,32',
         help='Comma-separated list of environment counts. Example: 1,2,4,8,16'
     )
-    args = parser.parse_args()
+    args = parser.parse_args(remaining_argv)
 
     env_counts = parse_env_counts(args.env_counts)
     if any(c <= 0 for c in env_counts):
@@ -126,6 +149,7 @@ if __name__ == '__main__':
     results = []
     
     try:
+        print(f"使用デバイス設定: {args.device} (実際のbackend: {jax.default_backend()})")
         print(f"ベンチマーク対象の環境数: {env_counts}")
         for num_agents in env_counts:
             print(f"\n================ num_agents={num_agents} ================")
