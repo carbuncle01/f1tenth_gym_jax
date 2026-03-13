@@ -36,7 +36,7 @@ class F110JaxSimulator:
         'v_min': -5.0, 'v_max': 20.0, 'width': 0.31, 'length': 0.58, 'laser_distance': 0.27,
     }
     
-    def __init__(self, map_path, map_ext, num_agents=2, params=None,
+    def __init__(self, map_path, map_ext='.png', num_agents=2, params=None,
                  seed=12345, time_step=0.01, ego_idx=0,
                  integrator=Integrator.RK4, num_beams=1080, fov=4.7,
                  lidar_dist=None):
@@ -139,19 +139,48 @@ class F110JaxSimulator:
         self.cosines_jax = jnp.array(cosines)
         self.side_distances_jax = jnp.array(side_distances)
 
+    def _resolve_map_paths(self, map_path, map_ext):
+        import os
+
+        yaml_exts = {'.yaml', '.yml'}
+        base_path, path_ext = os.path.splitext(map_path)
+        path_ext_lower = path_ext.lower()
+
+        if path_ext_lower in yaml_exts:
+            yaml_path = map_path
+            base_path = base_path
+        else:
+            if path_ext:
+                base_path = base_path
+            else:
+                base_path = map_path
+
+            yaml_candidates = [base_path + '.yaml', base_path + '.yml']
+            yaml_path = next((p for p in yaml_candidates if os.path.exists(p)), yaml_candidates[0])
+
+        if map_ext is None:
+            if path_ext and path_ext_lower not in yaml_exts:
+                image_ext = path_ext
+            else:
+                image_ext = '.png'
+        else:
+            image_ext = map_ext if map_ext.startswith('.') else f'.{map_ext}'
+
+        map_img_path = base_path + image_ext
+        return yaml_path, map_img_path
+
     def _load_map(self, map_path, map_ext):
         import yaml
         from PIL import Image
-        import os
         from scipy.ndimage import distance_transform_edt as edt
 
-        map_img_path = os.path.splitext(map_path)[0] + map_ext
+        yaml_path, map_img_path = self._resolve_map_paths(map_path, map_ext)
         map_img = np.array(Image.open(map_img_path).transpose(Image.FLIP_TOP_BOTTOM))
         map_img = map_img.astype(np.float64)
         map_img[map_img <= 128.] = 0.
         map_img[map_img > 128.] = 255.
         
-        with open(map_path, 'r') as yaml_stream:
+        with open(yaml_path, 'r') as yaml_stream:
             map_metadata = yaml.safe_load(yaml_stream)
             self.resolution = map_metadata['resolution']
             self.origin = map_metadata['origin']
@@ -425,6 +454,6 @@ class F110JaxSimulator:
         self._precompute_ttc_tables()
         self._build_step_kernel()  # パラメータが変わったらJITカーネルを再構築
 
-    def update_map(self, map_path, map_ext):
+    def update_map(self, map_path, map_ext='.png'):
         self._load_map(map_path, map_ext)
         self._build_step_kernel()  # マップが変わったらJITカーネルを再構築
