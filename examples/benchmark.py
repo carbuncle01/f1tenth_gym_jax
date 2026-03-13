@@ -15,17 +15,22 @@ def generate_initial_poses(num_agents):
 
 def run_benchmark(sim, num_agents, num_steps=1000, speed=5.0):
     import jax
+    import jax.numpy as jnp
 
-    # テスト用のダミー入力 (直進): [steer, speed]
-    actions = np.zeros((num_agents, 2), dtype=np.float32)
-    actions[:, 1] = speed
+    # テスト用のダミー入力: 最初から JAX 配列 (GPUメモリ上) に置いておく
+    actions = jnp.zeros((num_agents, 2), dtype=jnp.float32)
+    actions = actions.at[:, 1].set(speed)
 
     print("--- 1. ウォームアップ開始 (JITコンパイル) ---")
     start_warmup = time.time()
+    
     # 初回のstep呼び出し時にJITコンパイルが走ります
-    sim.step(actions)
-    # 完了を保証するため非同期実行をブロック (JAX特有の作法)
-    jax.block_until_ready(sim.state) 
+    obs, reward, done, info = sim.step(actions)
+    
+    # E2E版では obs が JAX 配列の辞書になっています。
+    # 確実にGPUの計算完了を待つため、重い計算結果である LiDAR スキャン配列をブロックします。
+    obs['scans'].block_until_ready()
+    
     warmup_time = time.time() - start_warmup
     print(f"ウォームアップ完了: {warmup_time:.3f} 秒")
 
@@ -33,10 +38,11 @@ def run_benchmark(sim, num_agents, num_steps=1000, speed=5.0):
     start_time = time.time()
     
     for _ in range(num_steps):
-        sim.step(actions)
+        obs, reward, done, info = sim.step(actions)
         
-    # 全ての計算が終わるのを待つ
-    jax.block_until_ready(sim.state)
+    # ループを抜けた後、最後のステップの計算が終わるのを待つ
+    obs['scans'].block_until_ready()
+    
     elapsed = time.time() - start_time
 
     fps = num_steps / elapsed
@@ -44,6 +50,7 @@ def run_benchmark(sim, num_agents, num_steps=1000, speed=5.0):
     print(f"合計実行時間: {elapsed:.3f} 秒")
     print(f"FPS (シミュレータ step/秒): {fps:.1f}")
     print(f"Throughput (env-step/秒): {env_fps:.1f}")
+    
     return {
         'num_agents': num_agents,
         'num_steps': num_steps,

@@ -187,17 +187,21 @@ def main():
     print(f"Start pose: x={poses[0,0]:.3f}, y={poses[0,1]:.3f}, theta={np.degrees(start_theta):.1f}deg")
     obs, _, done, _ = sim.reset(poses)
     
-    # ---- 1. ウォームアップ (JAXのコンパイルを計測に含めない) ----
+    # ---- 1. ウォームアップ ----
     print("JAX Warming up...")
     dummy_action = np.array([[0.0, 0.0]])
-    sim.step(dummy_action)
-    jax.block_until_ready(sim.state) # コンパイル完了を待機
+    obs, _, _, _ = sim.step(dummy_action)
+    
+    # JAX配列（GPUメモリ）として出力されるため、block_until_readyで待機
+    if hasattr(obs['scans'], 'block_until_ready'):
+        obs['scans'].block_until_ready()
     
     # ---- 2. 本番シミュレーション ----
-    # 軌跡に加えて、向き(theta)とLiDARスキャンデータも保存するリストを追加
-    traj_x, traj_y = [obs['poses_x'][0]], [obs['poses_y'][0]]
-    traj_theta = [obs['poses_theta'][0]]
-    traj_scans = [obs['scans'][0]]
+    # JAX配列からPython標準の float や NumPy配列 に明示的にキャストして保存する
+    traj_x = [float(obs['poses_x'][0])]
+    traj_y = [float(obs['poses_y'][0])]
+    traj_theta = [float(obs['poses_theta'][0])]
+    traj_scans = [np.array(obs['scans'][0])]
     
     laptime = 0.0
     steps = 0
@@ -206,31 +210,36 @@ def main():
     print("Simulating...")
     start = time.time()
     
-    while not done and steps < max_steps:
-        # Plannerの計算はNumPy (CPU)
-        speed, steer = planner.plan(
-            obs['poses_x'][0], obs['poses_y'][0], obs['poses_theta'][0],
-            work['tlad'], work['vgain']
-        )
+    # doneもJAX配列になっている可能性があるため、bool()で評価
+    while not bool(done) and steps < max_steps:
+        # Plannerへの入力時に float() で CPUへ持ってくる
+        px = float(obs['poses_x'][0])
+        py = float(obs['poses_y'][0])
+        ptheta = float(obs['poses_theta'][0])
         
-        # JAX Simulatorのステップ実行
+        speed, steer = planner.plan(px, py, ptheta, work['tlad'], work['vgain'])
+        
+        # SimulatorはJAX環境だが、NumPyを渡せば自動でJAX配列に変換される
         obs, step_reward, done, info = sim.step(np.array([[steer, speed]]))
         
-        traj_x.append(obs['poses_x'][0])
-        traj_y.append(obs['poses_y'][0])
-        traj_theta.append(obs['poses_theta'][0]) # 向きを保存
-        traj_scans.append(obs['scans'][0])       # LiDARスキャンを保存
+        # 結果をCPU(NumPy/float)に戻してリストに追加
+        traj_x.append(float(obs['poses_x'][0]))
+        traj_y.append(float(obs['poses_y'][0]))
+        traj_theta.append(float(obs['poses_theta'][0]))
+        traj_scans.append(np.array(obs['scans'][0]))
         
         laptime += sim.time_step
         steps += 1
         
-    jax.block_until_ready(sim.state) # 全ての非同期計算の完了を待機
+    # 最後にもう一度待機
+    if hasattr(obs['scans'], 'block_until_ready'):
+        obs['scans'].block_until_ready()
+        
     elapsed = time.time() - start
     
     print(f"Done: {steps} steps, {laptime:.1f}s sim, {elapsed:.1f}s real, {steps/elapsed:.0f} FPS")
-    print(f"Collisions: {obs['collisions']}, Laps: {obs['lap_counts']}")
     
-    # ---- 3. レンダリング (動画保存) ----
+    # --- 以下レンダリング処理（変更なし） ---
     print("Rendering video with LiDAR...")
     with open(yaml_path, 'r') as f:
         map_meta = yaml.safe_load(f)
@@ -247,18 +256,14 @@ def main():
     ]
     
     fig, ax = plt.subplots(figsize=(10, 10))
-    # マップの描画を少し暗くしてLiDARを目立たせる (vmaxを調整)
     ax.imshow(img_array, cmap='gray', origin='lower', extent=extent, vmax=255, vmin=-50)
     
     wpt_x = wpt_data[:, conf.wpt_xind]
     wpt_y = wpt_data[:, conf.wpt_yind]
     ax.plot(wpt_x, wpt_y, 'g--', linewidth=1.5, alpha=0.7, label='Centerline')
     
-    # 車両の軌跡と現在位置
     car_line, = ax.plot([], [], 'b-', linewidth=2.5, alpha=0.8, label='Trajectory')
     car_pos, = ax.plot([], [], 'ro', markersize=8, zorder=5, label='Car')
-    
-    # LiDARのヒットポイントを描画する散布図オブジェクトを作成 (オレンジ色の小さな点)
     lidar_pts = ax.scatter([], [], s=2, c='orange', alpha=0.6, zorder=4, label='LiDAR Hits')
     
     ax.set_xlim(extent[0], extent[1])
@@ -270,7 +275,6 @@ def main():
     frame_skip = 3 
     frames = steps // frame_skip
     
-    # 事前にJAXで計算したレーザーの角度配列(1080本)を取得 (NumPy化しておく)
     scan_angles = np.array(sim.scan_angles)
     
     def init():
@@ -282,26 +286,19 @@ def main():
     def animate(i):
         idx = min(i * frame_skip, len(traj_x) - 1)
         
-        # 軌跡と車体の更新
         car_line.set_data(traj_x[:idx+1], traj_y[:idx+1])
         car_pos.set_data([traj_x[idx]], [traj_y[idx]])
         
-        # --- LiDARポイントの計算と更新 ---
         current_x = traj_x[idx]
         current_y = traj_y[idx]
         current_theta = traj_theta[idx]
         current_scan = traj_scans[idx]
         
-        # 車の向き(theta) ＋ 各ビームの角度(scan_angles) ＝ グローバルなレーザーの角度
         global_angles = current_theta + scan_angles
-        
-        # 極座標(距離と角度)から直交座標(X, Y)へ変換
         pts_x = current_x + current_scan * np.cos(global_angles)
         pts_y = current_y + current_scan * np.sin(global_angles)
         
-        # 散布図の座標データを一括更新
         lidar_pts.set_offsets(np.c_[pts_x, pts_y])
-        
         return car_line, car_pos, lidar_pts
     
     ani = animation.FuncAnimation(fig, animate, init_func=init, frames=frames, interval=33, blit=True)
