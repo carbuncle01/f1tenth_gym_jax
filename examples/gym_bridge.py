@@ -41,6 +41,7 @@ class JaxGymBridge(Node):
         self.declare_parameter('map_path', '')
         self.declare_parameter('map_img_ext', '.png')
         self.declare_parameter('num_agent', 2)
+
         self.declare_parameter('sx', 0.0)
         self.declare_parameter('sy', 0.0)
         self.declare_parameter('stheta', 0.0)
@@ -62,6 +63,8 @@ class JaxGymBridge(Node):
             map_path=self.get_parameter('map_path').value,
             map_ext=self.get_parameter('map_img_ext').value,
             num_agents=num_agents,
+            num_beams=self.get_parameter('scan_beams').value,
+            fov=self.get_parameter('scan_fov').value,
             lidar_dist=self.get_parameter('scan_distance_to_base_link').value
         )
 
