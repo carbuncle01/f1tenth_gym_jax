@@ -35,7 +35,7 @@ pip install -e .
 
 GPU利用時は、環境に合わせた `jaxlib` を別途インストールしてください：
 ```bash
-pip install --upgrade "jax[cuda12]"
+pip install --no-cache-dir "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
 
 ## 使い方
