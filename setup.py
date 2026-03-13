@@ -6,13 +6,15 @@ setup(
     description='JAX GPU-accelerated F1TENTH simulator — faithful reimplementation of f1tenth_gym',
     packages=find_packages(),
     install_requires=[
-        'jax',
-        'jaxlib',
+        'jax[cuda12_pip]',
         'numpy',
         'scipy',
         'Pillow',
         'PyYAML',
         'matplotlib',
+    ],
+    dependency_links=[
+        'https://storage.googleapis.com/jax-releases/jax_cuda_releases.html'
     ],
     python_requires='>=3.8',
 )
