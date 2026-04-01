@@ -49,6 +49,7 @@ sim = F110JaxSimulator(
     map_ext='.png',
     num_agents=2,
     integrator=Integrator.RK4,
+    max_range=30.0,  # LiDAR max distance (m)
 )
 
 poses = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])

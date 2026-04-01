@@ -40,6 +40,7 @@ class JaxGymBridge(Node):
         self.declare_parameter('scan_distance_to_base_link', 0.27)
         self.declare_parameter('scan_fov', 4.7)
         self.declare_parameter('scan_beams', 1080)
+        self.declare_parameter('scan_max_range', 30.0)
         self.declare_parameter('map_path', '')
         self.declare_parameter('map_img_ext', '.png')
         self.declare_parameter('num_agent', 2)
@@ -67,7 +68,8 @@ class JaxGymBridge(Node):
             num_agents=num_agents,
             num_beams=self.get_parameter('scan_beams').value,
             fov=self.get_parameter('scan_fov').value,
-            lidar_dist=self.get_parameter('scan_distance_to_base_link').value
+            lidar_dist=self.get_parameter('scan_distance_to_base_link').value,
+            max_range=self.get_parameter('scan_max_range').value,
         )
 
         sx = self.get_parameter('sx').value
@@ -88,6 +90,7 @@ class JaxGymBridge(Node):
         self.angle_min = -scan_fov / 2.
         self.angle_max = scan_fov / 2.
         self.angle_inc = scan_fov / scan_beams
+        self.scan_max_range = float(self.get_parameter('scan_max_range').value)
         self.scan_distance_to_base_link = self.get_parameter('scan_distance_to_base_link').value
         
         if num_agents == 2:
@@ -206,7 +209,7 @@ class JaxGymBridge(Node):
         scan = LaserScan()
         scan.header.stamp = ts; scan.header.frame_id = self.ego_namespace + '/laser'
         scan.angle_min = self.angle_min; scan.angle_max = self.angle_max; scan.angle_increment = self.angle_inc
-        scan.range_min = 0.; scan.range_max = 30.
+        scan.range_min = 0.; scan.range_max = self.scan_max_range
         scan.ranges = self.ego_scan # すでにfloatのリストに変換済み
         
         self.ego_scan_pub.publish(scan)
@@ -215,7 +218,7 @@ class JaxGymBridge(Node):
             opp_scan = LaserScan()
             opp_scan.header.stamp = ts; opp_scan.header.frame_id = self.opp_namespace + '/laser'
             opp_scan.angle_min = self.angle_min; opp_scan.angle_max = self.angle_max; opp_scan.angle_increment = self.angle_inc
-            opp_scan.range_min = 0.; opp_scan.range_max = 30.
+            opp_scan.range_min = 0.; opp_scan.range_max = self.scan_max_range
             opp_scan.ranges = self.opp_scan # すでにfloatのリストに変換済み
             
             self.opp_scan_pub.publish(opp_scan)

@@ -39,7 +39,7 @@ class F110JaxSimulator:
     def __init__(self, map_path, map_ext='.png', num_agents=2, params=None,
                  seed=12345, time_step=0.01, ego_idx=0,
                  integrator=Integrator.RK4, num_beams=1080, fov=4.7,
-                 lidar_dist=None):
+                 lidar_dist=None, max_range=30.0):
         self.num_agents = num_agents
         self.seed = seed
         self.time_step = time_step
@@ -80,7 +80,9 @@ class F110JaxSimulator:
         self.fov = fov
         self.eps = 0.0001
         self.theta_dis = 2000
-        self.max_range = 30.0
+        self.max_range = float(max_range)
+        if self.max_range <= 0.0:
+            raise ValueError(f"max_range must be > 0, got {self.max_range}")
         self.ttc_thresh = 0.005
         
         self.steer_buffer_size = 2
